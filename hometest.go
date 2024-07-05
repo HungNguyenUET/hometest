@@ -11,49 +11,38 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 )
 
 const FILE_PATH string = "TheArtOfThinkingClearly.txt"
+const SUMMARY_FILE_PATH string = "Summary.txt"
 const CHAPTER_TITLE = "Summary of Chapter "
 
-var summaryContentArr [20]string
-var wg sync.WaitGroup
+var askWG sync.WaitGroup
+var appWg sync.WaitGroup
 
-type OpenAIResponse struct {
-	ID      string   `json:"id"`
-	Object  string   `json:"object"`
-	Created int64    `json:"created"`
-	Model   string   `json:"model"`
-	Choices []Choice `json:"choices"`
-	Usage   Usage    `json:"usage"`
-}
-
-type Choice struct {
-	Index        int     `json:"index"`
-	Message      Message `json:"message"`
-	FinishReason string  `json:"finish_reason"`
-}
-
-type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
-}
+var originalContentQueue Queue
+var readFileCompleted bool = false
+var limit = 5 //concurrency up to n requests to OpenAI, to prevent hitting OpenAI's rate limiter
 
 func main() {
-	readFileAndAskOpenAi()
+	start := time.Now()
+	fmt.Println("Start")
 
-	wg.Wait()
+	appWg.Add(1)
+	go readFile()
 
-	writeFile()
+	appWg.Add(1)
+	go summaryContentByAI()
+
+	appWg.Wait()
+
+	elapsed := time.Since(start) // End time
+	fmt.Printf("Function took %s\n", elapsed)
 }
 
-func readFileAndAskOpenAi() {
+func readFile() {
+	defer appWg.Done()
 	f, err := os.Open(FILE_PATH)
 	if err != nil {
 		log.Fatal(err)
@@ -65,43 +54,44 @@ func readFileAndAskOpenAi() {
 
 	var line string
 	var content string
-	var index int64
 	for scanner.Scan() {
-		// do something with a line
 		line = scanner.Text()
 		if isInteger(line) && len(content) > 0 {
-			index, _ = strconv.ParseInt(line, 0, 64)
-			wg.Add(1)
-			go summaryContentByOpenAi(index-2, content)
+			originalContentQueue.Enqueue(content)
 			content = ""
 		} else if !isInteger(line) {
 			content += "\n" + line
 		}
 	}
 
-	wg.Add(1)
-	go summaryContentByOpenAi(index-1, content)
+	originalContentQueue.Enqueue(content)
+	readFileCompleted = true
 }
 
-func writeFile() {
-	f, err := os.Create("Summary.txt")
-	check(err)
-	defer f.Close()
+func summaryContentByAI() {
+	defer appWg.Done()
 
-	for index := range summaryContentArr {
-		var content string = summaryContentArr[index]
-		if len(content) > 0 {
-			var title string = CHAPTER_TITLE + strconv.Itoa(index+1)
-			content = title + content + "\n"
-			_, err := f.WriteString(content)
-			check(err)
-			f.Sync()
+	var index = 1
+	for !readFileCompleted || !originalContentQueue.IsEmpty() {
+		if len(originalContentQueue.items) > limit || readFileCompleted {
+			var summaryContentArr = make([]string, limit)
+			for i := range limit {
+				var originalContent = originalContentQueue.Dequeue()
+				askWG.Add(1)
+				go askAI(originalContent, index, i, summaryContentArr)
+				index++
+			}
+
+			askWG.Wait()
+
+			go writeFile(summaryContentArr)
 		}
 	}
 }
 
-func summaryContentByOpenAi(index int64, content string) {
-	key := "key"
+func askAI(content string, chaperIndex int, arrIndex int, summaryContentArr []string) {
+	defer askWG.Done()
+	key := "sk-team2024-home-test-vP00R3HgNtYAroFA1rRbT3BlbkFJ6XTugV2XnCDwPKOnwg18"
 
 	url := "https://api.openai.com/v1/chat/completions"
 	question := "Summary \"" + content + "\""
@@ -150,7 +140,25 @@ func summaryContentByOpenAi(index int64, content string) {
 	}
 
 	if len(openAIResponse.Choices) > 0 {
-		summaryContentArr[index] = openAIResponse.Choices[0].Message.Content
+		var summaryContent = openAIResponse.Choices[0].Message.Content
+		var title string = CHAPTER_TITLE + strconv.Itoa(chaperIndex)
+		summaryContent = title + "\n" + summaryContent + "\n"
+		summaryContentArr[arrIndex] = summaryContent
+	}
+}
+
+func writeFile(summaryContentArr []string) {
+	f, err := os.OpenFile(SUMMARY_FILE_PATH, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
+	check(err)
+	defer f.Close()
+
+	for index := range summaryContentArr {
+		var content string = summaryContentArr[index]
+		if len(content) > 0 {
+			_, err := f.WriteString(content)
+			check(err)
+			f.Sync()
+		}
 	}
 }
 
@@ -163,4 +171,60 @@ func check(e error) {
 	if e != nil {
 		panic(e)
 	}
+}
+
+type OpenAIResponse struct {
+	ID      string   `json:"id"`
+	Object  string   `json:"object"`
+	Created int64    `json:"created"`
+	Model   string   `json:"model"`
+	Choices []Choice `json:"choices"`
+	Usage   Usage    `json:"usage"`
+}
+
+type Choice struct {
+	Index        int     `json:"index"`
+	Message      Message `json:"message"`
+	FinishReason string  `json:"finish_reason"`
+}
+
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+type Queue struct {
+	items []string
+}
+
+func (q *Queue) Enqueue(item string) {
+	q.items = append(q.items, item)
+}
+
+func (q *Queue) Dequeue() string {
+	if len(q.items) == 0 {
+		fmt.Println("Queue is empty")
+		return ""
+	}
+	item := q.items[0]
+	q.items = q.items[1:]
+	return item
+}
+
+func (q *Queue) IsEmpty() bool {
+	return len(q.items) == 0
+}
+
+func (q *Queue) Front() string {
+	if len(q.items) == 0 {
+		fmt.Println("Queue is empty")
+		return ""
+	}
+	return q.items[0]
 }
