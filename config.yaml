@@ -1,0 +1,6 @@
+FILE_PATH: TheArtOfThinkingClearly.txt
+SUMMARY_FILE_PATH: Summary.txt
+OPEN_AI_LIMIT_REQUEST: 5
+OPEN_AI_KEY: sk-team2024-home-test-vP00R3HgNtYAroFA1rRbT3BlbkFJ6XTugV2XnCDwPKOnwg18
+OPEN_AI_URL: https://api.openai.com/v1/chat/completions
+OPEN_AI_MODEL: gpt-3.5-turbo
